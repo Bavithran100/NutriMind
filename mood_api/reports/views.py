@@ -43,34 +43,25 @@ class ChatMessageViewSet(viewsets.ModelViewSet):
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def _call_hugging_face_api(self, message):
-        """Call Hugging Face Inference API for nutrition/mood advice with emotion detection"""
+        """Call Hugging Face Inference API for nutrition/mood advice"""
         try:
             headers = {"Authorization": f"Bearer {settings.HUGGINGFACE_API_KEY}"}
+            API_URL = "https://api-inference.huggingface.co/models/facebook/blenderbot-400M-distill"
 
-            # First, detect emotion in the user's message
-            emotion_data = self._detect_emotion(message)
-
-            # Use emotion context to create a more personalized prompt
-            emotion_context = ""
-            if emotion_data:
-                top_emotion = emotion_data[0]['label']
-                confidence = emotion_data[0]['score']
-                if confidence > 0.5:  # Only use if confidence is reasonable
-                    emotion_context = f"The user seems to be feeling {top_emotion}. "
-
-            # Use google/flan-t5-base for text generation - better for direct Q&A
-            API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-base"
-
-            # Create a focused prompt for nutrition/wellness advice with emotion context
-            prompt = f"{emotion_context}Provide helpful nutrition and wellness advice for this question: {message}"
+            # Prompt tuned for conversational nutrition advice
+            prompt = f"I'm a nutrition assistant. {message}"
 
             payload = {
-                "inputs": prompt,
+                "inputs": {
+                    "past_user_inputs": [],
+                    "generated_responses": [],
+                    "text": prompt
+                },
                 "parameters": {
-                    "max_length": 150,
+                    "max_length": 200,
                     "temperature": 0.7,
-                    "do_sample": True,
-                    "top_p": 0.9
+                    "top_p": 0.9,
+                    "do_sample": True
                 }
             }
 
@@ -79,48 +70,22 @@ class ChatMessageViewSet(viewsets.ModelViewSet):
             if response.status_code == 200:
                 result = response.json()
 
+                # BlenderBot returns a list with dicts containing 'generated_text'
+                if isinstance(result, list) and "generated_text" in result[0]:
+                    advice = result[0]["generated_text"].strip()
+                    return advice if len(advice) > 5 else self._get_fallback_response(message)
 
-                if isinstance(result, list) and len(result) > 0:
-                    first_item = result[0]
-
-                    # Handle different response formats
-                    if isinstance(first_item, dict):
-                        generated_text = first_item.get('generated_text', '')
-                    elif isinstance(first_item, str):
-                        generated_text = first_item
-                    elif isinstance(first_item, list) and len(first_item) > 0:
-                        # If it's a list of lists, take the first string
-                        if isinstance(first_item[0], str):
-                            generated_text = first_item[0]
-                        else:
-                            generated_text = str(first_item[0])
-                    else:
-                        generated_text = str(first_item)
-
-                    # Clean up the response
-                    if generated_text.startswith(prompt):
-                        # Remove the prompt from the response
-                        advice = generated_text[len(prompt):].strip()
-                    else:
-                        advice = generated_text.strip()
-
-                    # If we get a meaningful response, return it
-                    if advice and len(advice) > 10:  # Ensure it's not too short
-                        return advice
-                    else:
-                        # If response is too short or empty, use fallback
-                        return self._get_fallback_response(message)
-                else:
-                    return self._get_fallback_response(message)
-            else:
-                print(f"Hugging Face API error: {response.status_code} - {response.text}")
                 return self._get_fallback_response(message)
 
+            else:
+                # Expose error message for debugging
+                raise Exception(f"Hugging Face API error {response.status_code}: {response.text}")
+
         except requests.exceptions.RequestException as e:
-            print(f"Request error calling Hugging Face API: {e}")
+            print(f"Request error: {e}")
             return self._get_fallback_response(message)
         except Exception as e:
-            print(f"Unexpected error in Hugging Face API call: {e}")
+            print(f"Unexpected Hugging Face API error: {e}")
             return self._get_fallback_response(message)
 
     def _get_fallback_response(self, message):
